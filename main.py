@@ -32,19 +32,23 @@ def get_args_parser():
 
     # Dataset specific
     parser.add_argument("--dataset_config", default=None, required=True)
-    parser.add_argument("--unitab_pretrain", action="store_true", help="Whether to do the simvlm like split text pretrain; now mainly use in dataloader IO text generation")
-    parser.add_argument("--pretrain_seqcrop", default="mixed", type=str, help="How to crop the sequence during unitab pretraining. first, rand, \
+    parser.add_argument(
+        "--unitab_pretrain",
+        action="store_true",
+        help="Whether to do the simvlm like split text pretrain; now mainly use in dataloader IO text generation")
+    parser.add_argument("--pretrain_seqcrop",
+                        default="mixed",
+                        type=str,
+                        help="How to crop the sequence during unitab pretraining. first, rand, \
         , grounding, or mixed (first+grounding)")
     parser.add_argument("--do_caption", action="store_true", help="Whether to do text generation")
-    parser.add_argument("--do_flickrgrounding", action="store_true", help="a high level key for the flickr grounding experiments; \
+    parser.add_argument("--do_flickrgrounding",
+                        action="store_true",
+                        help="a high level key for the flickr grounding experiments; \
         will need keys --dataset_config configs/flickr.json, without --do_caption --no_detection")
     parser.add_argument("--no_detection", action="store_true", help="Whether to train the detector")
-    parser.add_argument(
-        "--combine_datasets", nargs="+", help="List of datasets to combine for training", default=["flickr"]
-    )
-    parser.add_argument(
-        "--combine_datasets_val", nargs="+", help="List of datasets to combine for eval", default=["flickr"]
-    )
+    parser.add_argument("--combine_datasets", nargs="+", help="List of datasets to combine for training", default=["flickr"])
+    parser.add_argument("--combine_datasets_val", nargs="+", help="List of datasets to combine for eval", default=["flickr"])
 
     parser.add_argument("--coco_path", type=str, default="")
     parser.add_argument("--vg_img_path", type=str, default="")
@@ -57,6 +61,7 @@ def get_args_parser():
     parser.add_argument("--batch_size", default=2, type=int)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--epochs", default=40, type=int)
+    parser.add_argument("--step_per_epoch", type=int)
     parser.add_argument("--lr_drop", default=35, type=int)
     parser.add_argument("--optimizer", default="adam", type=str)
     parser.add_argument("--clip_max_norm", default=0.1, type=float, help="gradient clipping max norm")
@@ -85,9 +90,7 @@ def get_args_parser():
         help="Path to the pretrained model. If set, only the mask head will be trained",
     )
 
-    parser.add_argument(
-        "--freeze_text_encoder", action="store_true", help="Whether to freeze the weights of the text encoder"
-    )
+    parser.add_argument("--freeze_text_encoder", action="store_true", help="Whether to freeze the weights of the text encoder")
 
     parser.add_argument(
         "--text_encoder_type",
@@ -161,13 +164,14 @@ def get_args_parser():
     # Distributed training parameters
     parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
     parser.add_argument("--dist-url", default="env://", help="url used to set up distributed training")
+
     return parser
 
 
 def main(args):
     # Init distributed mode
     dist.init_distributed_mode(args)
-
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     # Update dataset specific configs
     if args.dataset_config is not None:
         # https://stackoverflow.com/a/16878364
@@ -178,7 +182,7 @@ def main(args):
 
     print("git:\n  {}\n".format(utils.get_sha()))
 
-    print(args)
+    print(json.dumps(vars(args), indent=4, sort_keys=True))
 
     device = torch.device(args.device)
     output_dir = Path(args.output_dir)
@@ -188,7 +192,7 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    torch.set_deterministic(True)
+    # torch.use_deterministic_algorithms(True)
 
     # Build the model
     model, criterion, weight_dict = build_model(args)
@@ -198,7 +202,10 @@ def main(args):
     model_ema = deepcopy(model) if args.ema else None
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model,
+                                                          device_ids=[args.gpu],
+                                                          find_unused_parameters=True,
+                                                          broadcast_buffers=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of params:", n_parameters)
@@ -207,8 +214,7 @@ def main(args):
     param_dicts = [
         {
             "params": [
-                p
-                for n, p in model_without_ddp.named_parameters()
+                p for n, p in model_without_ddp.named_parameters()
                 if "backbone" not in n and "text_encoder" not in n and p.requires_grad
             ]
         },
@@ -235,7 +241,7 @@ def main(args):
     dataset_train, sampler_train, data_loader_train = None, None, None
     if not args.eval:
         #### temporal solution for update refexp_dataset_name and GT_type for multi-task finetuning
-        if type(args.refexp_dataset_name)==type([]):
+        if isinstance(args.refexp_dataset_name, list):
             gttype_cache, refexpname_cache = args.GT_type, args.refexp_dataset_name
             flickr_img_path_cache, coco_path_cache = args.flickr_img_path, args.coco_path
             dataset_list = []
@@ -246,14 +252,12 @@ def main(args):
                 args.flickr_img_path = flickr_img_path_cache[ii]
                 args.coco_path = coco_path_cache[ii]
                 dataset_list.append(build_dataset(name, image_set="train", args=args))
-                print(len(dataset_list[-1]),name,args.GT_type,args.refexp_dataset_name)
+                print(len(dataset_list[-1]), name, args.GT_type, args.refexp_dataset_name)
             dataset_train = ConcatDataset(dataset_list)
             args.GT_type, args.refexp_dataset_name = "merged_karpathy", "refcocog"
-            args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k_images_split/train", "data/coco"
+            args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k-images/train", "data/coco"
         else:
-            dataset_train = ConcatDataset(
-                [build_dataset(name, image_set="train", args=args) for name in args.combine_datasets]
-            )
+            dataset_train = ConcatDataset([build_dataset(name, image_set="train", args=args) for name in args.combine_datasets])
 
         if args.distributed:
             sampler_train = DistributedSampler(dataset_train)
@@ -276,17 +280,15 @@ def main(args):
     Val_all = namedtuple(typename="val_data", field_names=["dataset_name", "dataloader", "base_ds", "evaluator_list"])
 
     #### temporal solution for update refexp_dataset_name and GT_type for multi-task finetuning
-    if type(args.refexp_dataset_name)==type([]):
-        assert("multitask" in args.dataset_config)
+    if isinstance(args.refexp_dataset_name, list):
+        assert ("multitask" in args.dataset_config)
         args.GT_type, args.refexp_dataset_name = "merged_karpathy", "refcocog"
         args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k_images_split/train", "data/coco"
 
     val_tuples = []
     for dset_name in args.combine_datasets_val:
         dset = build_dataset(dset_name, image_set="val", args=args)
-        sampler = (
-            DistributedSampler(dset, shuffle=False) if args.distributed else torch.utils.data.SequentialSampler(dset)
-        )
+        sampler = (DistributedSampler(dset, shuffle=False) if args.distributed else torch.utils.data.SequentialSampler(dset))
         dataloader = DataLoader(
             dset,
             args.batch_size,
@@ -348,13 +350,10 @@ def main(args):
         evaluator_list = []
         if "flickr" in dataset_name and do_caption:
             evaluator_list.append(
-                FlickrCaptionEvaluator(
-                    args.flickr_dataset_path,
-                    subset="test" if args.test else "val",
-                    merge_boxes=args.GT_type == "merged",
-                    exp_id=args.output_dir
-                )
-            )
+                FlickrCaptionEvaluator(args.flickr_dataset_path,
+                                       subset="test" if args.test else "val",
+                                       merge_boxes=args.GT_type == "merged",
+                                       exp_id=args.output_dir))
         if args.no_detection:
             return evaluator_list
         iou_types = ["bbox"]
@@ -368,8 +367,7 @@ def main(args):
                     args.flickr_dataset_path,
                     subset="test" if args.test else "val",
                     merge_boxes=args.GT_type == "merged",
-                )
-            )
+                ))
         return evaluator_list
 
     # Runs only evaluation, by default on the validation set unless --test is passed.
@@ -394,7 +392,8 @@ def main(args):
             test_stats.update({item.dataset_name + "_" + k: v for k, v in curr_test_stats.items()})
 
         log_stats = {
-            **{f"test_{k}": v for k, v in test_stats.items()},
+            **{f"test_{k}": v
+               for k, v in test_stats.items()},
             "n_parameters": n_parameters,
         }
         print(log_stats)
@@ -408,18 +407,19 @@ def main(args):
         print(f"Starting epoch {epoch}")
         if args.distributed:
             sampler_train.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model=model,
-            criterion=criterion,
-            data_loader=data_loader_train,
-            weight_dict=weight_dict,
-            optimizer=optimizer,
-            device=device,
-            epoch=epoch,
-            args=args,
-            max_norm=args.clip_max_norm,
-            model_ema=model_ema,
-        )
+            train_stats = train_one_epoch(
+                model=model,
+                criterion=criterion,
+                data_loader=data_loader_train,
+                weight_dict=weight_dict,
+                optimizer=optimizer,
+                device=device,
+                epoch=epoch,
+                args=args,
+                max_norm=args.clip_max_norm,
+                model_ema=model_ema,
+            )
+
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
             # extra checkpoint before LR drop and every 2 epochs
@@ -437,31 +437,31 @@ def main(args):
                     checkpoint_path,
                 )
 
-        if epoch % args.eval_skip == 0:
-            test_stats = {}
-            test_model = model_ema if model_ema is not None else model
-            for i, item in enumerate(val_tuples):
-                evaluator_list = build_evaluator_list(item.base_ds, item.dataset_name, args.do_caption)
-                item = item._replace(evaluator_list=evaluator_list)
-                postprocessors = build_postprocessors(args, item.dataset_name)
-                print(f"Evaluating {item.dataset_name}")
-                curr_test_stats = evaluate(
-                    model=test_model,
-                    criterion=criterion,
-                    postprocessors=postprocessors,
-                    weight_dict=weight_dict,
-                    data_loader=item.dataloader,
-                    evaluator_list=item.evaluator_list,
-                    device=device,
-                    args=args,
-                )
-                test_stats.update({item.dataset_name + "_" + k: v for k, v in curr_test_stats.items()})
-        else:
-            test_stats = {}
+        test_stats = {}
+        # if epoch % args.eval_skip == 0:
+        #     test_model = model_ema if model_ema is not None else model
+        #     for i, item in enumerate(val_tuples):
+        #         evaluator_list = build_evaluator_list(item.base_ds, item.dataset_name, args.do_caption)
+        #         item = item._replace(evaluator_list=evaluator_list)
+        #         postprocessors = build_postprocessors(args, item.dataset_name)
+        #         print(f"Evaluating {item.dataset_name}")
+        #         curr_test_stats = evaluate(
+        #             model=test_model,
+        #             criterion=criterion,
+        #             postprocessors=postprocessors,
+        #             weight_dict=weight_dict,
+        #             data_loader=item.dataloader,
+        #             evaluator_list=item.evaluator_list,
+        #             device=device,
+        #             args=args,
+        #         )
+        #         test_stats.update({item.dataset_name + "_" + k: v for k, v in curr_test_stats.items()})
 
         log_stats = {
-            **{f"train_{k}": v for k, v in train_stats.items()},
-            **{f"test_{k}": v for k, v in test_stats.items()},
+            **{f"train_{k}": v
+               for k, v in train_stats.items()},
+            **{f"test_{k}": v
+               for k, v in test_stats.items()},
             "epoch": epoch,
             "n_parameters": n_parameters,
         }
@@ -470,37 +470,38 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-        if epoch % args.eval_skip == 0:
-            if args.do_caption:
-                metric = metric_stats["CIDEr"]
-            else:
-                metric = np.mean([v[1] for k, v in test_stats.items() if "coco_eval_bbox" in k])
+        # if epoch % args.eval_skip == 0:
+        #     if args.do_caption:
+        #         metric = metric_stats["CIDEr"]
+        #     else:
+        #         metric = np.mean([v[1] for k, v in test_stats.items() if "coco_eval_bbox" in k])
 
-            if args.output_dir and metric > best_metric:
-                best_metric = metric
-                checkpoint_paths = [output_dir / "BEST_checkpoint.pth"]
-                # extra checkpoint before LR drop and every 100 epochs
-                for checkpoint_path in checkpoint_paths:
-                    dist.save_on_master(
-                        {
-                            "model": model_without_ddp.state_dict(),
-                            "model_ema": model_ema.state_dict() if args.ema else None,
-                            "optimizer": optimizer.state_dict(),
-                            "epoch": epoch,
-                            "args": args,
-                        },
-                        checkpoint_path,
-                    )
+        #     if args.output_dir and metric > best_metric:
+        #         best_metric = metric
+        #         checkpoint_paths = [output_dir / "BEST_checkpoint.pth"]
+        #         # extra checkpoint before LR drop and every 100 epochs
+        #         for checkpoint_path in checkpoint_paths:
+        #             dist.save_on_master(
+        #                 {
+        #                     "model": model_without_ddp.state_dict(),
+        #                     "model_ema": model_ema.state_dict() if args.ema else None,
+        #                     "optimizer": optimizer.state_dict(),
+        #                     "epoch": epoch,
+        #                     "args": args,
+        #                 },
+        #                 checkpoint_path,
+        #             )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("UniTAB training and evaluation script", parents=[get_args_parser()])
     args = parser.parse_args()
-    args.GT_type = ''   ## updated from json in main()
-    args.refexp_dataset_name = ''   ## updated from json in main()
+    args.GT_type = ''  # updated from json in main()
+    args.refexp_dataset_name = ''  # updated from json in main()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

@@ -55,14 +55,14 @@ def adjust_learning_rate(
     """
     num_warmup_steps: int = round(args.fraction_warmup_steps * num_training_steps)
     if args.schedule == "step":
-        gamma = 0.1 ** (epoch // args.lr_drop)
+        gamma = 0.1**(epoch // args.lr_drop)
         text_encoder_gamma = gamma
     elif args.schedule == "multistep":
         milestones = list(range(args.lr_drop, args.epochs, 50))
-        gamma = 0.5 ** bisect_right(milestones, epoch)
+        gamma = 0.5**bisect_right(milestones, epoch)
         text_encoder_gamma = gamma
     elif args.schedule == "linear_with_warmup":
-        gamma = 0.1 ** (epoch // args.lr_drop)
+        gamma = 0.1**(epoch // args.lr_drop)
         if curr_step < num_warmup_steps:
             text_encoder_gamma = float(curr_step) / float(max(1, num_warmup_steps))
         else:
