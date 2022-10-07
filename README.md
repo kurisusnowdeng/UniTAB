@@ -1,30 +1,6 @@
 # UniTAB: Unifying Text and Box Outputs for Grounded VL Modeling
-[UniTAB: Unifying Text and Box Outputs for Grounded Vision-Language Modeling](https://arxiv.org/pdf/2111.12085.pdf)
 
-by [Zhengyuan Yang](https://zhengyuan.info), [Zhe Gan](https://zhegan27.github.io/), [Jianfeng Wang](http://jianfengwang.me/), [Xiaowei Hu](https://scholar.google.com/citations?user=Pj0TwxwAAAAJ&hl=en), [Faisal Ahmed](https://scholar.google.com/citations?hl=en&user=laKl8acAAAAJ), [Zicheng Liu](https://zicliu.wixsite.com/mysite), [Yumao Lu](https://www.linkedin.com/in/yumao/), [Lijuan Wang](https://www.microsoft.com/en-us/research/people/lijuanw/)
-
-European Conference on Computer Vision, 2022, Oral Presentation
-
-
-### Introduction
-We propose UniTAB, a vision-language (VL) model that unifies text generation and bounding box prediction into a single architecture.
-For more details, please refer to our
-[paper](https://arxiv.org/pdf/2111.12085.pdf).
-
-
-<p align="center">
-  <img src="https://zyang-ur.github.io//unitab/unitab.jpg" width="100%"/>
-</p>
-
-### Citation
-
-    @inproceedings{yang2022unitab,
-      title={UniTAB: Unifying Text and Box Outputs for Grounded Vision-Language Modeling},
-      author={Yang, Zhengyuan and Gan, Zhe and Wang, Jianfeng and Hu, Xiaowei and Ahmed, Faisal and Liu, Zicheng and Lu, Yumao and Wang, Lijuan},
-      booktitle={ECCV},
-      year={2022}
-    }
-
+This repo is forked from [Unitab](https://github.com/microsoft/UniTAB), which support train by [ColossalAI](https://github.com/hpcaitech/ColossalAI)(Colossal-AI: A Unified Deep Learning System for Big Model Era)
 
 ## Installation
 
@@ -59,10 +35,6 @@ path/to/azcopy copy https://unitab.blob.core.windows.net/data/weights <local_pat
 path/to/azcopy copy https://unitab.blob.core.windows.net/data/annotations <local_path> --recursive
 ```
 
-### Distributed Training
-We do not specify ``distributed training`` tool in the example commands below. Pytorch distributed ``python -m torch.distributed.launch --nproc_per_node=8 --use_env main.py`` or [submitit](https://github.com/facebookincubator/submitit) supported. Or update ``util/dist.py/init_distributed_mode()`` to fit your cluster setting.
-
-
 ## Data
 
 * Download the original Flickr30k image dataset from : [Flickr30K webpage](http://shannon.cs.illinois.edu/DenotationGraph/) and update the `flickr_img_path` to the folder containing the images.
@@ -80,6 +52,32 @@ The config file for pretraining is ``configs/pretrain.json``. Optionally startin
 Example command (ngpu=64):
 ```
 CUBLAS_WORKSPACE_CONFIG=:4096:8  python main.py --dataset_config configs/pretrain.json --batch_size 2 --lr_backbone 2e-5 --text_encoder_lr 2e-5 --lr 1e-4 --num_queries 200 --max_decoding_step 256 --do_caption --no_detection --unitab_pretrain --pretrain_seqcrop mixed --ema --output-dir weights/$exp_id --load https://zenodo.org/record/4721981/files/pretrained_resnet101_checkpoint.pth
+```
+
+## Distributed Training by colossalAi
+We offer a shell script `colossalai.sh` to support distributed train by colossalai or run the command below
+
+```shell
+CUBLAS_WORKSPACE_CONFIG=:4096:8  
+
+torchrun --nproc_per_node=4 --master_port 29505  main.py \
+    --dataset_config configs/pretrain_test_flickr_only.json \
+    --colossalai_config config.py \
+    --batch_size 4 \
+    --lr_backbone 2e-5 \
+    --text_encoder_lr 2e-5 \
+    --lr 1e-4 \
+    --num_queries 200 \
+    --max_decoding_step 256 \
+    --do_caption \
+    --no_detection \
+    --unitab_pretrain \
+    --pretrain_seqcrop mixed \
+    --ema \
+    --output-dir weights/$exp_id \
+    --distributed \
+    --load path/to/weights/pretrained_checkpoint.pth \
+    --from_colossalai \
 ```
 
 ## Multi-task Finetuning
@@ -276,25 +274,4 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8  python main.py --dataset_config configs/flickr_
 The project is built based on the following repository:
 * [MDETR--Modulated Detection for End-to-End Multi-Modal Understanding](https://github.com/ashkamath/mdetr),
 * [transformers](https://github.com/huggingface/transformers).
-
-### Contributing
-
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
-
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
-### Trademarks
-
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+* [ColossalAI](https://github.com/hpcaitech/ColossalAI)

@@ -17,6 +17,7 @@ from util.misc import NestedTensor
 
 from .position_encoding import build_position_encoding
 
+
 class FrozenBatchNorm2d(torch.nn.Module):
     """
     BatchNorm2d where the batch statistics and the affine parameters are fixed.
@@ -33,16 +34,14 @@ class FrozenBatchNorm2d(torch.nn.Module):
         self.register_buffer("running_mean", torch.zeros(n))
         self.register_buffer("running_var", torch.ones(n))
 
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys,
+                              error_msgs):
         num_batches_tracked_key = prefix + "num_batches_tracked"
         if num_batches_tracked_key in state_dict:
             del state_dict[num_batches_tracked_key]
 
-        super(FrozenBatchNorm2d, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-        )
+        super(FrozenBatchNorm2d, self)._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
+                                                             unexpected_keys, error_msgs)
 
     def forward(self, x):
         # move reshapes to the beginning
@@ -58,6 +57,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
 
 class BackboneBase(nn.Module):
+
     def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int):
         super().__init__()
         for name, parameter in backbone.named_parameters():
@@ -81,13 +81,16 @@ class Backbone(BackboneBase):
 
     def __init__(self, name: str, train_backbone: bool, dilation: bool):
         backbone = getattr(torchvision.models, name)(
-            replace_stride_with_dilation=[False, False, dilation], pretrained=True, norm_layer=FrozenBatchNorm2d
+            replace_stride_with_dilation=[False, False, dilation],
+            norm_layer=FrozenBatchNorm2d,
+            # pretrained=True,
         )
         num_channels = 512 if name in ("resnet18", "resnet34") else 2048
         super().__init__(backbone, train_backbone, num_channels)
 
 
 class Joiner(nn.Sequential):
+
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
 
