@@ -39,7 +39,7 @@ def crop(image, target, region):
 
     if "masks" in target:
         # FIXME should we update the area here if there are no boxes?
-        target["masks"] = target["masks"][:, i : i + h, j : j + w]
+        target["masks"] = target["masks"][:, i:i + h, j:j + w]
         fields.append("masks")
 
     # remove elements for which the boxes or masks that have zero area
@@ -110,7 +110,7 @@ def resize(image, target, size, max_size=None):
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
     size = get_size(image.size, size, max_size)
-    rescaled_image = F.resize(image, size, interpolation=Image.BICUBIC)
+    rescaled_image = F.resize(image, size, interpolation=T.InterpolationMode.BICUBIC)
 
     if target is None:
         return rescaled_image, None
@@ -152,6 +152,7 @@ def pad(image, target, padding):
 
 
 class RandomCrop(object):
+
     def __init__(self, size):
         self.size = size
 
@@ -161,6 +162,7 @@ class RandomCrop(object):
 
 
 class RandomSizeCrop(object):
+
     def __init__(self, min_size: int, max_size: int, respect_boxes: bool = False):
         self.min_size = min_size
         self.max_size = max_size
@@ -180,6 +182,7 @@ class RandomSizeCrop(object):
 
 
 class CenterCrop(object):
+
     def __init__(self, size):
         self.size = size
 
@@ -192,6 +195,7 @@ class CenterCrop(object):
 
 
 class RandomHorizontalFlip(object):
+
     def __init__(self, p=0.5):
         self.p = p
 
@@ -202,6 +206,7 @@ class RandomHorizontalFlip(object):
 
 
 class RandomResize(object):
+
     def __init__(self, sizes, max_size=None):
         assert isinstance(sizes, (list, tuple))
         self.sizes = sizes
@@ -213,6 +218,7 @@ class RandomResize(object):
 
 
 class RandomPad(object):
+
     def __init__(self, max_pad):
         self.max_pad = max_pad
 
@@ -240,11 +246,13 @@ class RandomSelect(object):
 
 
 class ToTensor(object):
+
     def __call__(self, img, target):
         return F.to_tensor(img), target
 
 
 class RandomErasing(object):
+
     def __init__(self, *args, **kwargs):
         self.eraser = T.RandomErasing(*args, **kwargs)
 
@@ -253,6 +261,7 @@ class RandomErasing(object):
 
 
 class Normalize(object):
+
     def __init__(self, mean, std):
         self.mean = mean
         self.std = std
@@ -272,6 +281,7 @@ class Normalize(object):
 
 
 class RemoveDifficult(object):
+
     def __init__(self, enabled=False):
         self.remove_difficult = enabled
 
@@ -288,6 +298,7 @@ class RemoveDifficult(object):
 
 
 class Compose(object):
+
     def __init__(self, transforms):
         self.transforms = transforms
 

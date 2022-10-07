@@ -4,19 +4,18 @@ from typing import List, Optional
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from transformers import RobertaModel, RobertaTokenizerFast
+from transformers import RobertaTokenizerFast
+from .text_encoder import RobertaModel, RobertaConfig
+
 
 class DecoderEmbeddings(nn.Module):
+
     def __init__(self, vocab_size, hidden_dim, pad_token_id, max_position_embeddings, dropout):
         super().__init__()
-        self.word_embeddings = nn.Embedding(
-            vocab_size, hidden_dim, padding_idx=pad_token_id)
-        self.position_embeddings = nn.Embedding(
-            max_position_embeddings, hidden_dim
-        )
+        self.word_embeddings = nn.Embedding(vocab_size, hidden_dim, padding_idx=pad_token_id)
+        self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_dim)
 
-        self.LayerNorm = torch.nn.LayerNorm(
-            hidden_dim)
+        self.LayerNorm = torch.nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -24,8 +23,7 @@ class DecoderEmbeddings(nn.Module):
         seq_length = input_shape[1]
         device = x.device
 
-        position_ids = torch.arange(
-            seq_length, dtype=torch.long, device=device)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0).expand(input_shape)
 
         input_embeds = self.word_embeddings(x)
@@ -37,7 +35,9 @@ class DecoderEmbeddings(nn.Module):
 
         return embeddings
 
+
 class Transformer(nn.Module):
+
     def __init__(
         self,
         d_model=512,
@@ -65,23 +65,25 @@ class Transformer(nn.Module):
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
         decoder_norm = nn.LayerNorm(d_model)
-        self.decoder = TransformerDecoder(
-            decoder_layer, num_decoder_layers, decoder_norm, return_intermediate=return_intermediate_dec
-        )
+        self.decoder = TransformerDecoder(decoder_layer,
+                                          num_decoder_layers,
+                                          decoder_norm,
+                                          return_intermediate=return_intermediate_dec)
 
         self._reset_parameters()
 
         self.tokenizer = RobertaTokenizerFast.from_pretrained(text_encoder_type)
-        self.text_encoder = RobertaModel.from_pretrained(text_encoder_type)
+        config = RobertaConfig.from_pretrained(text_encoder_type)
+        self.text_encoder = RobertaModel(config=config)
 
-        self.embedding = DecoderEmbeddings(len(self.tokenizer)+num_queries+2, d_model, 1, max_decoding_step, dropout)
+        self.embedding = DecoderEmbeddings(
+            len(self.tokenizer) + num_queries + 2, d_model, 1, max_decoding_step, dropout)
 
         if freeze_text_encoder:
             for p in self.text_encoder.parameters():
                 p.requires_grad_(False)
 
         self.expander_dropout = 0.1
-        config = self.text_encoder.config
         self.resizer = FeatureResizer(
             input_feat_size=config.hidden_size,
             output_feat_size=d_model,
@@ -128,7 +130,11 @@ class Transformer(nn.Module):
 
             if isinstance(text[0], str):
                 # Encode the text
-                tokenized = self.tokenizer.batch_encode_plus(text, padding="max_length", max_length=max_encoding_step, truncation=True, return_tensors="pt").to(device)
+                tokenized = self.tokenizer.batch_encode_plus(text,
+                                                             padding="max_length",
+                                                             max_length=max_encoding_step,
+                                                             truncation=True,
+                                                             return_tensors="pt").to(device)
                 encoded_text = self.text_encoder(**tokenized)
 
                 # Transpose memory because pytorch's attention expects sequence first
@@ -138,14 +144,21 @@ class Transformer(nn.Module):
 
                 # Resize the encoder hidden states to be of the same d_model as the decoder
                 text_memory_resized = self.resizer(text_memory)
-            elif type(text[0])==type(torch.zeros(0)):
+            elif type(text[0]) == type(torch.zeros(0)):
                 # The text is already encoded, use as is.
                 text_attention_mask, text_memory_resized, tokenized = text
             ## added; support input tokenized in dataloader for unitab_pretrain
-            elif len(text[0].keys())==2:
-                tokenized = self.tokenizer.batch_encode_plus([''], padding="max_length", max_length=max_encoding_step, truncation=True, return_tensors="pt").to(device)
-                tokenized['input_ids'] = torch.stack([text[ii]['input_ids'] for ii in range(len(text))],dim=0).squeeze(1).to(device)[:,:tokenized['input_ids'].shape[-1]]
-                tokenized['attention_mask'] = torch.stack([text[ii]['attention_mask'] for ii in range(len(text))],dim=0).squeeze(1).to(device)[:,:tokenized['attention_mask'].shape[-1]]
+            elif len(text[0].keys()) == 2:
+                tokenized = self.tokenizer.batch_encode_plus([''],
+                                                             padding="max_length",
+                                                             max_length=max_encoding_step,
+                                                             truncation=True,
+                                                             return_tensors="pt").to(device)
+                tokenized['input_ids'] = torch.stack([text[ii]['input_ids'] for ii in range(len(text))],
+                                                     dim=0).squeeze(1).to(device)[:, :tokenized['input_ids'].shape[-1]]
+                tokenized['attention_mask'] = torch.stack(
+                    [text[ii]['attention_mask'] for ii in range(len(text))],
+                    dim=0).squeeze(1).to(device)[:, :tokenized['attention_mask'].shape[-1]]
                 encoded_text = self.text_encoder(**tokenized)
 
                 # Transpose memory because pytorch's attention expects sequence first
@@ -168,7 +181,7 @@ class Transformer(nn.Module):
 
             img_memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
 
-            text_memory = img_memory[-len(text_memory_resized) :]
+            text_memory = img_memory[-len(text_memory_resized):]
 
             assert img_memory.shape[1] == text_memory.shape[1] == tgt.shape[1]
             memory_cache = {
@@ -204,7 +217,9 @@ class Transformer(nn.Module):
             )
             return hs.transpose(1, 2)
 
+
 class TransformerEncoder(nn.Module):
+
     def __init__(self, encoder_layer, num_layers, norm=None):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
@@ -231,6 +246,7 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
+
     def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
@@ -285,6 +301,7 @@ class TransformerDecoder(nn.Module):
 
 
 class TransformerEncoderLayer(nn.Module):
+
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu", normalize_before=False):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -349,6 +366,7 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerDecoderLayer(nn.Module):
+
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu", normalize_before=False):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -391,7 +409,7 @@ class TransformerDecoderLayer(nn.Module):
     ):
         q = k = self.with_pos_embed(tgt, query_pos)
 
-        tgt_mask = ~(torch.tril(torch.ones((tgt.shape[0],tgt.shape[0]))).to(tgt.device).bool())
+        tgt_mask = ~(torch.tril(torch.ones((tgt.shape[0], tgt.shape[0]))).to(tgt.device).bool())
 
         # Self attention
         tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0]
@@ -461,9 +479,8 @@ class TransformerDecoderLayer(nn.Module):
         query_pos: Optional[Tensor] = None,
     ):
         if self.normalize_before:
-            return self.forward_pre(
-                tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos
-            )
+            return self.forward_pre(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask,
+                                    pos, query_pos)
         return self.forward_post(
             tgt,
             memory,

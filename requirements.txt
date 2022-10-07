@@ -1,10 +1,10 @@
-torch==1.8.2
-torchvision>=0.6.0
+torch
+torchvision
 cython
 scipy
 xmltodict
 tqdm
-transformers==4.5.1
+transformers
 onnx
 onnxruntime
 prettytable

@@ -19,6 +19,7 @@ from util.metrics import MetricLogger, SmoothedValue
 from util.misc import targets_to
 from util.optim import adjust_learning_rate, update_ema
 
+
 def train_one_epoch(
     model: torch.nn.Module,
     criterion: Optional[torch.nn.Module],
@@ -39,11 +40,14 @@ def train_one_epoch(
     metric_logger.add_meter("lr_backbone", SmoothedValue(window_size=1, fmt="{value:.6f}"))
     metric_logger.add_meter("lr_text_encoder", SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = "Epoch: [{}]".format(epoch)
-    print_freq = 1000
+    print_freq = 1
 
-    num_training_steps = int(len(data_loader) * args.epochs)
-    for i, batch_dict in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        curr_step = epoch * len(data_loader) + i
+    step_per_epoch = len(data_loader) if args.step_per_epoch is None else args.step_per_epoch
+    num_training_steps = int(step_per_epoch * args.epochs)
+    iterator = metric_logger.log_every(data_loader, print_freq, header)
+    for i in range(step_per_epoch):
+        batch_dict = next(iterator)
+        curr_step = epoch * step_per_epoch + i
         samples = batch_dict["samples"].to(device)
         positive_map = batch_dict["positive_map"].to(device) if "positive_map" in batch_dict else None
         targets = batch_dict["targets"]
@@ -76,8 +80,10 @@ def train_one_epoch(
 
         optimizer.zero_grad()
         losses.backward()
+
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
         optimizer.step()
 
         adjust_learning_rate(
@@ -94,6 +100,7 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_backbone=optimizer.param_groups[1]["lr"])
         metric_logger.update(lr_text_encoder=optimizer.param_groups[2]["lr"])
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -117,8 +124,10 @@ def evaluate(
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Test:"
-
-    for batch_dict in metric_logger.log_every(data_loader, 10, header):
+    iterator = metric_logger.log_every(data_loader, 10, header)
+    step_per_epoch = len(data_loader) if args.step_per_epoch is None else args.step_per_epoch
+    for _ in range(step_per_epoch):
+        batch_dict = next(iterator)
         samples = batch_dict["samples"].to(device)
         positive_map = batch_dict["positive_map"].to(device) if "positive_map" in batch_dict else None
         targets = batch_dict["targets"]
@@ -155,14 +164,13 @@ def evaluate(
                 sentence_ids = [t["sentence_id"] for t in targets]
                 items_per_batch_element = [t["nb_eval"] for t in targets]
                 positive_map_eval = batch_dict["positive_map_eval"].to(device)
-                flickr_results = postprocessors["flickr_bbox"](
-                    outputs, orig_target_sizes, positive_map_eval, items_per_batch_element
-                )
+                flickr_results = postprocessors["flickr_bbox"](outputs, orig_target_sizes, positive_map_eval,
+                                                               items_per_batch_element)
                 assert len(flickr_results) == len(image_ids) == len(sentence_ids)
                 for im_id, sent_id, output in zip(image_ids, sentence_ids, flickr_results):
                     flickr_res.append({"image_id": im_id, "sentence_id": sent_id, "boxes": output})
 
-            if results[0]['boxes'].shape[0]==1:
+            if results[0]['boxes'].shape[0] == 1:
                 for result in results:
                     result['scores'] = result['scores'].unsqueeze(1)[0]
                     result['labels'] = result['labels'].unsqueeze(1)[0]

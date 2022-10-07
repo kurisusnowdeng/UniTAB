@@ -38,7 +38,7 @@ class PositionEmbeddingSine(nn.Module):
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
-        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        dim_t = self.temperature**(2 * torch.div(dim_t, 2, rounding_mode='floor') / self.num_pos_feats)
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
@@ -70,18 +70,13 @@ class PositionEmbeddingLearned(nn.Module):
         j = torch.arange(h, device=x.device)
         x_emb = self.col_embed(i)
         y_emb = self.row_embed(j)
-        pos = (
-            torch.cat(
-                [
-                    x_emb.unsqueeze(0).repeat(h, 1, 1),
-                    y_emb.unsqueeze(1).repeat(1, w, 1),
-                ],
-                dim=-1,
-            )
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            .repeat(x.shape[0], 1, 1, 1)
-        )
+        pos = (torch.cat(
+            [
+                x_emb.unsqueeze(0).repeat(h, 1, 1),
+                y_emb.unsqueeze(1).repeat(1, w, 1),
+            ],
+            dim=-1,
+        ).permute(2, 0, 1).unsqueeze(0).repeat(x.shape[0], 1, 1, 1))
         return pos
 
 
