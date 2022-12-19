@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.utils
 from torch.utils.data import ConcatDataset, DataLoader, DistributedSampler
+from torch.cuda.amp import GradScaler
 
 import util.dist as dist
 import util.misc as utils
@@ -55,6 +56,7 @@ def get_args_parser():
     parser.add_argument("--vg_ann_path", type=str, default="")
 
     # Training hyper-parameters
+    parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--lr", default=1e-4, type=float)
     parser.add_argument("--lr_backbone", default=1e-5, type=float)
     parser.add_argument("--text_encoder_lr", default=5e-5, type=float)
@@ -159,7 +161,7 @@ def get_args_parser():
     parser.add_argument("--load", default="", help="resume from checkpoint")
     parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Only run evaluation")
-    parser.add_argument("--num_workers", default=5, type=int)
+    parser.add_argument("--num_workers", default=0, type=int)
 
     # Distributed training parameters
     parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
@@ -273,32 +275,32 @@ def main(args):
             num_workers=args.num_workers,
         )
 
-    # Val dataset
-    if len(args.combine_datasets_val) == 0:
-        raise RuntimeError("Please provide at leas one validation dataset")
+    # # Val dataset
+    # if len(args.combine_datasets_val) == 0:
+    #     raise RuntimeError("Please provide at leas one validation dataset")
 
-    Val_all = namedtuple(typename="val_data", field_names=["dataset_name", "dataloader", "base_ds", "evaluator_list"])
+    # Val_all = namedtuple(typename="val_data", field_names=["dataset_name", "dataloader", "base_ds", "evaluator_list"])
 
-    #### temporal solution for update refexp_dataset_name and GT_type for multi-task finetuning
-    if isinstance(args.refexp_dataset_name, list):
-        assert ("multitask" in args.dataset_config)
-        args.GT_type, args.refexp_dataset_name = "merged_karpathy", "refcocog"
-        args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k_images_split/train", "data/coco"
+    # #### temporal solution for update refexp_dataset_name and GT_type for multi-task finetuning
+    # if isinstance(args.refexp_dataset_name, list):
+    #     assert ("multitask" in args.dataset_config)
+    #     args.GT_type, args.refexp_dataset_name = "merged_karpathy", "refcocog"
+    #     args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k_images_split/train", "data/coco"
 
-    val_tuples = []
-    for dset_name in args.combine_datasets_val:
-        dset = build_dataset(dset_name, image_set="val", args=args)
-        sampler = (DistributedSampler(dset, shuffle=False) if args.distributed else torch.utils.data.SequentialSampler(dset))
-        dataloader = DataLoader(
-            dset,
-            args.batch_size,
-            sampler=sampler,
-            drop_last=False,
-            collate_fn=partial(utils.collate_fn, False),
-            num_workers=args.num_workers,
-        )
-        base_ds = get_coco_api_from_dataset(dset)
-        val_tuples.append(Val_all(dataset_name=dset_name, dataloader=dataloader, base_ds=base_ds, evaluator_list=None))
+    # val_tuples = []
+    # for dset_name in args.combine_datasets_val:
+    #     dset = build_dataset(dset_name, image_set="val", args=args)
+    #     sampler = (DistributedSampler(dset, shuffle=False) if args.distributed else torch.utils.data.SequentialSampler(dset))
+    #     dataloader = DataLoader(
+    #         dset,
+    #         args.batch_size,
+    #         sampler=sampler,
+    #         drop_last=False,
+    #         collate_fn=partial(utils.collate_fn, False),
+    #         num_workers=args.num_workers,
+    #     )
+    #     base_ds = get_coco_api_from_dataset(dset)
+    #     val_tuples.append(Val_all(dataset_name=dset_name, dataloader=dataloader, base_ds=base_ds, evaluator_list=None))
 
     if args.frozen_weights is not None:
         if args.resume.startswith("https"):
@@ -370,34 +372,39 @@ def main(args):
                 ))
         return evaluator_list
 
-    # Runs only evaluation, by default on the validation set unless --test is passed.
-    if args.eval:
-        test_stats = {}
-        test_model = model_ema if model_ema is not None else model
-        for i, item in enumerate(val_tuples):
-            evaluator_list = build_evaluator_list(item.base_ds, item.dataset_name, args.do_caption)
-            postprocessors = build_postprocessors(args, item.dataset_name)
-            item = item._replace(evaluator_list=evaluator_list)
-            print(f"Evaluating {item.dataset_name}")
-            curr_test_stats = evaluate(
-                model=test_model,
-                criterion=criterion,
-                postprocessors=postprocessors,
-                weight_dict=weight_dict,
-                data_loader=item.dataloader,
-                evaluator_list=item.evaluator_list,
-                device=device,
-                args=args,
-            )
-            test_stats.update({item.dataset_name + "_" + k: v for k, v in curr_test_stats.items()})
+    # # Runs only evaluation, by default on the validation set unless --test is passed.
+    # if args.eval:
+    #     test_stats = {}
+    #     test_model = model_ema if model_ema is not None else model
+    #     for i, item in enumerate(val_tuples):
+    #         evaluator_list = build_evaluator_list(item.base_ds, item.dataset_name, args.do_caption)
+    #         postprocessors = build_postprocessors(args, item.dataset_name)
+    #         item = item._replace(evaluator_list=evaluator_list)
+    #         print(f"Evaluating {item.dataset_name}")
+    #         curr_test_stats = evaluate(
+    #             model=test_model,
+    #             criterion=criterion,
+    #             postprocessors=postprocessors,
+    #             weight_dict=weight_dict,
+    #             data_loader=item.dataloader,
+    #             evaluator_list=item.evaluator_list,
+    #             device=device,
+    #             args=args,
+    #         )
+    #         test_stats.update({item.dataset_name + "_" + k: v for k, v in curr_test_stats.items()})
 
-        log_stats = {
-            **{f"test_{k}": v
-               for k, v in test_stats.items()},
-            "n_parameters": n_parameters,
-        }
-        print(log_stats)
-        return
+    #     log_stats = {
+    #         **{f"test_{k}": v
+    #            for k, v in test_stats.items()},
+    #         "n_parameters": n_parameters,
+    #     }
+    #     print(log_stats)
+    #     return
+
+    if args.fp16:
+        scaler = GradScaler()
+    else:
+        scaler = None
 
     # Runs training and evaluates after every --eval_skip epochs
     print("Start training")
@@ -413,6 +420,7 @@ def main(args):
             data_loader=data_loader_train,
             weight_dict=weight_dict,
             optimizer=optimizer,
+            scaler=scaler,
             device=device,
             epoch=epoch,
             args=args,

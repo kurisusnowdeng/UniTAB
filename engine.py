@@ -6,6 +6,7 @@ Train and eval functions used in main.py
 import math
 import sys
 from typing import Dict, Iterable, Optional
+from contextlib import nullcontext
 
 import torch
 import torch.nn
@@ -18,6 +19,7 @@ from datasets.refexp import RefExpEvaluator
 from util.metrics import MetricLogger, SmoothedValue
 from util.misc import targets_to
 from util.optim import adjust_learning_rate, update_ema
+from torch.cuda.amp import autocast, GradScaler
 
 
 def train_one_epoch(
@@ -26,12 +28,17 @@ def train_one_epoch(
     weight_dict: Dict[str, float],
     data_loader: Iterable,
     optimizer: torch.optim.Optimizer,
+    scaler: Optional[GradScaler],
     device: torch.device,
     epoch: int,
     args,
     max_norm: float = 0,
     model_ema: Optional[torch.nn.Module] = None,
 ):
+    if args.fp16:
+        assert scaler is not None, "Gradient scaling is not enabled for fp16 training."
+
+    torch.cuda.empty_cache()
     model.train()
     if criterion is not None:
         criterion.train()
@@ -44,7 +51,7 @@ def train_one_epoch(
 
     step_per_epoch = len(data_loader) if args.step_per_epoch is None else args.step_per_epoch
     num_training_steps = int(step_per_epoch * args.epochs)
-    iterator = metric_logger.log_every(data_loader, print_freq, header)
+    iterator = metric_logger.log_every(data_loader, print_freq, step_per_epoch, header)
     for i in range(step_per_epoch):
         batch_dict = next(iterator)
         curr_step = epoch * step_per_epoch + i
@@ -56,8 +63,10 @@ def train_one_epoch(
 
         targets = targets_to(targets, device)
 
-        memory_cache = model(samples, captions, targets, encode_and_save=True)
-        outputs = model(samples, captions, targets, encode_and_save=False, memory_cache=memory_cache)
+        fwd_ctx = autocast() if args.fp16 else nullcontext()
+        with fwd_ctx:
+            memory_cache = model(samples, captions, targets, encode_and_save=True)
+            outputs = model(samples, captions, targets, encode_and_save=False, memory_cache=memory_cache)
 
         loss_dict = {}
         if criterion is not None:
@@ -79,12 +88,20 @@ def train_one_epoch(
             sys.exit(1)
 
         optimizer.zero_grad()
-        losses.backward()
+        if args.fp16:
+            scaler.scale(losses).backward()
+            scaler.unscale_(optimizer)
+        else:
+            losses.backward()
 
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-        optimizer.step()
+        if args.fp16:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
 
         adjust_learning_rate(
             optimizer,
@@ -100,8 +117,14 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_backbone=optimizer.param_groups[1]["lr"])
         metric_logger.update(lr_text_encoder=optimizer.param_groups[2]["lr"])
+        if args.fp16:
+            metric_logger.update(scale=scaler.get_scale())
 
     # gather the stats from all processes
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
@@ -118,14 +141,15 @@ def evaluate(
     device: torch.device,
     args,
 ):
+    torch.cuda.empty_cache()
     model.eval()
     if criterion is not None:
         criterion.eval()
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Test:"
-    iterator = metric_logger.log_every(data_loader, 10, header)
     step_per_epoch = len(data_loader) if args.step_per_epoch is None else args.step_per_epoch
+    iterator = metric_logger.log_every(data_loader, 10, step_per_epoch, header)
     for _ in range(step_per_epoch):
         batch_dict = next(iterator)
         samples = batch_dict["samples"].to(device)
@@ -136,9 +160,10 @@ def evaluate(
 
         targets = targets_to(targets, device)
 
-        memory_cache = None
-        memory_cache = model(samples, captions, targets, encode_and_save=True)
-        outputs = model(samples, captions, targets, encode_and_save=False, memory_cache=memory_cache)
+        fwd_ctx = autocast() if args.fp16 else nullcontext()
+        with fwd_ctx:
+            memory_cache = model(samples, captions, targets, encode_and_save=True)
+            outputs = model(samples, captions, targets, encode_and_save=False, memory_cache=memory_cache)
 
         loss_dict = {}
         if criterion is not None:
