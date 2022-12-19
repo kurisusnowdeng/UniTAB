@@ -11,6 +11,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn
 import torch.optim
+from torch.cuda.amp import autocast, GradScaler
 
 import util.dist as dist
 from datasets.coco_eval import CocoEvaluator
@@ -19,7 +20,6 @@ from datasets.refexp import RefExpEvaluator
 from util.metrics import MetricLogger, SmoothedValue
 from util.misc import targets_to
 from util.optim import adjust_learning_rate, update_ema
-from torch.cuda.amp import autocast, GradScaler
 
 
 def train_one_epoch(
@@ -35,9 +35,6 @@ def train_one_epoch(
     max_norm: float = 0,
     model_ema: Optional[torch.nn.Module] = None,
 ):
-    if args.fp16:
-        assert scaler is not None, "Gradient scaling is not enabled for fp16 training."
-
     torch.cuda.empty_cache()
     model.train()
     if criterion is not None:
@@ -63,8 +60,7 @@ def train_one_epoch(
 
         targets = targets_to(targets, device)
 
-        fwd_ctx = autocast() if args.fp16 else nullcontext()
-        with fwd_ctx:
+        with autocast(dtype=torch.float16):
             memory_cache = model(samples, captions, targets, encode_and_save=True)
             outputs = model(samples, captions, targets, encode_and_save=False, memory_cache=memory_cache)
 
@@ -82,26 +78,20 @@ def train_one_epoch(
 
         loss_value = losses_reduced_scaled.item()
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            print(loss_dict_reduced)
-            sys.exit(1)
+        # if not math.isfinite(loss_value):
+        #     print("Loss is {}, stopping training".format(loss_value))
+        #     print(loss_dict_reduced)
+        #     sys.exit(1)
 
         optimizer.zero_grad()
-        if args.fp16:
-            scaler.scale(losses).backward()
-            scaler.unscale_(optimizer)
-        else:
-            losses.backward()
+        scaler.scale(losses).backward()
+        scaler.unscale_(optimizer)
 
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-        if args.fp16:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         adjust_learning_rate(
             optimizer,
@@ -117,8 +107,7 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_backbone=optimizer.param_groups[1]["lr"])
         metric_logger.update(lr_text_encoder=optimizer.param_groups[2]["lr"])
-        if args.fp16:
-            metric_logger.update(scale=scaler.get_scale())
+        metric_logger.update(scale=scaler.get_scale())
 
     # gather the stats from all processes
     try:

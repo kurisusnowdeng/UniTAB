@@ -11,6 +11,8 @@ import torch.distributed as dist
 
 from util.dist import is_dist_avail_and_initialized
 
+from colossalai.logging import get_dist_logger
+
 
 class SmoothedValue:
     """Track a series of values and provide access to smoothed values over a
@@ -104,6 +106,8 @@ class MetricLogger(object):
         self.meters[name] = meter
 
     def log_every(self, iterable, print_freq, max_step=None, header=None):
+        logger = get_dist_logger()
+
         i = 0
         if not header:
             header = ""
@@ -134,24 +138,22 @@ class MetricLogger(object):
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
                 if torch.cuda.is_available():
-                    print(
-                        log_msg.format(
-                            i,
-                            len(iterable),
-                            eta=eta_string,
-                            meters=str(self),
-                            time=str(iter_time),
-                            data=str(data_time),
-                            memory=torch.cuda.max_memory_allocated() / MB,
-                        ))
+                    logger.info(log_msg.format(i,
+                                               len(iterable),
+                                               eta=eta_string,
+                                               meters=str(self),
+                                               time=str(iter_time),
+                                               data=str(data_time),
+                                               memory=torch.cuda.max_memory_allocated() / MB),
+                                ranks=[0])
                 else:
-                    print(
-                        log_msg.format(i,
-                                       len(iterable),
-                                       eta=eta_string,
-                                       meters=str(self),
-                                       time=str(iter_time),
-                                       data=str(data_time)))
+                    logger.info(log_msg.format(i,
+                                               len(iterable),
+                                               eta=eta_string,
+                                               meters=str(self),
+                                               time=str(iter_time),
+                                               data=str(data_time)),
+                                ranks=[0])
             i += 1
             end = time.time()
             if max_step is not None and i >= max_step:
@@ -159,7 +161,7 @@ class MetricLogger(object):
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         avg_time = total_time / len(iterable) if max_step is None else total_time / max_step
-        print("{} Total time: {} ({:.4f} s / it)".format(header, total_time_str, avg_time))
+        logger.info("{} Total time: {} ({:.4f} s / it)".format(header, total_time_str, avg_time), ranks=[0])
 
 
 @torch.no_grad()

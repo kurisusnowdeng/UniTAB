@@ -1,3 +1,4 @@
+import math
 import copy
 from typing import List, Optional
 
@@ -6,6 +7,16 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from transformers import RobertaTokenizerFast
 from .text_encoder import RobertaModel, RobertaConfig
+from apex.normalization import FusedLayerNorm
+from colossalai.kernel.cuda_native.flash_attention import FlashAttention, FlashCrossAttention
+from einops import rearrange
+
+
+@torch.jit.script
+def dropout_add(x: Tensor, residual: Tensor, prob: float, training: bool) -> Tensor:
+    out = F.dropout(x, p=prob, training=training)
+    out = residual + out
+    return out
 
 
 class DecoderEmbeddings(nn.Module):
@@ -15,7 +26,7 @@ class DecoderEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(vocab_size, hidden_dim, padding_idx=pad_token_id)
         self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_dim)
 
-        self.LayerNorm = torch.nn.LayerNorm(hidden_dim)
+        self.LayerNorm = FusedLayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -59,13 +70,13 @@ class Transformer(nn.Module):
 
         self.max_decoding_step = max_decoding_step
         self.pass_pos_and_query = pass_pos_and_query
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = FusedLayerNorm(d_model)
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
-        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        encoder_norm = FusedLayerNorm(d_model) if normalize_before else None
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
-        decoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        decoder_norm = FusedLayerNorm(d_model) if normalize_before else None
         self.decoder = TransformerDecoder(decoder_layer,
                                           num_decoder_layers,
                                           decoder_norm,
@@ -300,20 +311,89 @@ class TransformerDecoder(nn.Module):
         return output
 
 
+class MultiheadAttention(nn.Module):
+
+    def __init__(self,
+                 embed_dim,
+                 num_heads,
+                 dropout=0.,
+                 bias=True,
+                 batch_first=False,
+                 cross_attn=False,
+                 device=None,
+                 dtype=None) -> None:
+        super().__init__()
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.batch_first = batch_first
+        self.cross_attn = cross_attn
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        if not cross_attn:
+            self.attention_func = FlashAttention(softmax_scale=math.sqrt(self.head_dim), attention_dropout=self.dropout)
+        else:
+            self.attention_func = FlashCrossAttention(softmax_scale=math.sqrt(self.head_dim), attention_dropout=self.dropout)
+        self.in_proj_weight = nn.Parameter(torch.empty((3, embed_dim, embed_dim), **factory_kwargs))
+        if bias:
+            self.in_proj_bias = nn.Parameter(torch.empty(3, embed_dim, **factory_kwargs))
+        else:
+            self.register_parameter('in_proj_bias', None)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+
+    def _reset_parameters(self):
+        if self._qkv_same_embed_dim:
+            nn.init.xavier_uniform_(self.in_proj_weight)
+
+        if self.in_proj_bias is not None:
+            nn.init.constant_(self.in_proj_bias, 0.)
+            nn.init.constant_(self.out_proj.bias, 0.)
+
+    def forward(self,
+                query: Tensor,
+                key: Tensor,
+                value: Tensor,
+                key_padding_mask: Optional[Tensor] = None,
+                causal: bool = False) -> Tensor:
+        if not self.cross_attn:
+            qkv = torch.stack((query, key, value), dim=1)
+            qkv = torch.matmul(qkv, self.in_proj_weight).transpose(1, 2)
+            if self.in_proj_bias is not None:
+                qkv = qkv + self.in_proj_bias
+            qkv = rearrange(qkv, 's b three (h d) -> b s three h d', three=3, h=self.num_heads)
+            context, _ = self.attention_func(qkv.half(), key_padding_mask=key_padding_mask, causal=causal)
+        else:
+            q = torch.matmul(query, self.in_proj_weight[0])  # [s,b,h*d]
+            kv = torch.stack((key, value), dim=1)
+            kv = torch.matmul(kv, self.in_proj_weight[1:]).transpose(1, 2)  # [s,b,2,h*d]
+            if self.in_proj_bias is not None:
+                q = q + self.in_proj_bias[0]
+                kv = kv + self.in_proj_bias[1:]
+            q = rearrange(q, 's b (h d) -> b s h d', h=self.num_heads)
+            kv = rearrange(kv, 's b two (h d) -> b s two h d', two=2, h=self.num_heads)
+            context = self.attention_func(q.half(), kv.half())
+
+        context = rearrange(context, 'b s h d -> s b (h d)')
+        out = self.out_proj(context)
+        return out.float()
+
+
 class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu", normalize_before=False):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
+        self.norm1 = FusedLayerNorm(d_model)
+        self.norm2 = FusedLayerNorm(d_model)
+        # self.dropout1 = nn.Dropout(dropout)
+        # self.dropout2 = nn.Dropout(dropout)
+        self.dropout1 = dropout
 
         self.activation = _get_activation_fn(activation)
         self.normalize_before = normalize_before
@@ -329,11 +409,13 @@ class TransformerEncoderLayer(nn.Module):
         pos: Optional[Tensor] = None,
     ):
         q = k = self.with_pos_embed(src, pos)
-        src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
-        src = src + self.dropout1(src2)
+        src2 = self.self_attn(q, k, value=src, key_padding_mask=src_key_padding_mask)
+        # src = src + self.dropout1(src2)
+        src = dropout_add(src2, src, self.dropout1, self.training)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        src = src + self.dropout2(src2)
+        # src = src + self.dropout2(src2)
+        src = dropout_add(src2, src, self.dropout1, self.training)
         src = self.norm2(src)
         return src
 
@@ -346,11 +428,13 @@ class TransformerEncoderLayer(nn.Module):
     ):
         src2 = self.norm1(src)
         q = k = self.with_pos_embed(src2, pos)
-        src2 = self.self_attn(q, k, value=src2, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
-        src = src + self.dropout1(src2)
+        src2 = self.self_attn(q, k, value=src2, key_padding_mask=src_key_padding_mask)
+        # src = src + self.dropout1(src2)
+        src = dropout_add(src2, src, self.dropout, self.training)
         src2 = self.norm2(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
-        src = src + self.dropout2(src2)
+        # src = src + self.dropout2(src2)
+        src = dropout_add(src2, src, self.dropout, self.training)
         return src
 
     def forward(
@@ -369,7 +453,7 @@ class TransformerDecoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu", normalize_before=False):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
         self.cross_attn_image = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # self.cross_attn_text = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
 
@@ -378,14 +462,15 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        self.norm1 = nn.LayerNorm(d_model)
+        self.norm1 = FusedLayerNorm(d_model)
         # self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.norm4 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        # self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-        self.dropout4 = nn.Dropout(dropout)
+        self.norm3 = FusedLayerNorm(d_model)
+        self.norm4 = FusedLayerNorm(d_model)
+        # self.dropout1 = nn.Dropout(dropout)
+        # # self.dropout2 = nn.Dropout(dropout)
+        # self.dropout3 = nn.Dropout(dropout)
+        # self.dropout4 = nn.Dropout(dropout)
+        self.dropout1 = dropout
 
         self.activation = _get_activation_fn(activation)
         self.normalize_before = normalize_before
@@ -409,27 +494,27 @@ class TransformerDecoderLayer(nn.Module):
     ):
         q = k = self.with_pos_embed(tgt, query_pos)
 
-        tgt_mask = ~(torch.tril(torch.ones((tgt.shape[0], tgt.shape[0]))).to(tgt.device).bool())
+        # tgt_mask = ~(torch.tril(torch.ones((tgt.shape[0], tgt.shape[0]))).to(tgt.device).bool())
 
         # Self attention
-        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
+        tgt2 = self.self_attn(q, k, value=tgt, key_padding_mask=tgt_key_padding_mask, causal=True)
+        # tgt = tgt + self.dropout1(tgt2)
+        tgt = dropout_add(tgt2, tgt, self.dropout1, self.training)
         tgt = self.norm1(tgt)
 
         # Cross attention to image
-        tgt2 = self.cross_attn_image(
-            query=self.with_pos_embed(tgt, query_pos),
-            key=self.with_pos_embed(memory, pos),
-            value=memory,
-            attn_mask=memory_mask,
-            key_padding_mask=memory_key_padding_mask,
-        )[0]
-        tgt = tgt + self.dropout3(tgt2)
+        tgt2 = self.cross_attn_image(query=self.with_pos_embed(tgt, query_pos),
+                                     key=self.with_pos_embed(memory, pos),
+                                     value=memory,
+                                     key_padding_mask=memory_key_padding_mask)[0]
+        # tgt = tgt + self.dropout3(tgt2)
+        tgt = dropout_add(tgt2, tgt, self.dropout1, self.training)
         tgt = self.norm3(tgt)
 
         # FFN
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout4(tgt2)
+        # tgt = tgt + self.dropout4(tgt2)
+        tgt = dropout_add(tgt2, tgt, self.dropout1, self.training)
         tgt = self.norm4(tgt)
         return tgt
 
@@ -506,7 +591,7 @@ class FeatureResizer(nn.Module):
         self.do_ln = do_ln
         # Object feature encoding
         self.fc = nn.Linear(input_feat_size, output_feat_size, bias=True)
-        self.layer_norm = nn.LayerNorm(output_feat_size, eps=1e-12)
+        self.layer_norm = FusedLayerNorm(output_feat_size, eps=1e-12)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, encoder_features):
