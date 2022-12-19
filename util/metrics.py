@@ -103,7 +103,7 @@ class MetricLogger(object):
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq, max_step=None, header=None):
         i = 0
         if not header:
             header = ""
@@ -154,9 +154,12 @@ class MetricLogger(object):
                                        data=str(data_time)))
             i += 1
             end = time.time()
+            if max_step is not None and i >= max_step:
+                break
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print("{} Total time: {} ({:.4f} s / it)".format(header, total_time_str, total_time / len(iterable)))
+        avg_time = total_time / len(iterable) if max_step is None else total_time / max_step
+        print("{} Total time: {} ({:.4f} s / it)".format(header, total_time_str, avg_time))
 
 
 @torch.no_grad()

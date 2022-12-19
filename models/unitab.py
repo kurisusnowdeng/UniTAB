@@ -163,11 +163,13 @@ class UniTAB(nn.Module):
             samples = NestedTensor.from_tensor_list(samples)
         if encode_and_save:
             assert memory_cache is None
-            features, pos = self.backbone(samples)
-            src, mask = features[-1].decompose()
+            with torch.cuda.amp.autocast(dtype=torch.float32):
+                features, pos = self.backbone(samples)
+                src, mask = features[-1].decompose()
+                src = self.input_proj(src)
             coordquery_embed = self.transformer.embedding.word_embeddings.weight
             memory_cache = self.transformer(
-                self.input_proj(src),
+                src,
                 mask,
                 coordquery_embed,
                 pos[-1],

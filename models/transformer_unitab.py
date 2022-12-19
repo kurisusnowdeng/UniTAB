@@ -59,12 +59,13 @@ class Transformer(nn.Module):
 
         self.max_decoding_step = max_decoding_step
         self.pass_pos_and_query = pass_pos_and_query
+        self.norm = nn.LayerNorm(d_model)
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
-        decoder_norm = nn.LayerNorm(d_model)
+        decoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.decoder = TransformerDecoder(decoder_layer,
                                           num_decoder_layers,
                                           decoder_norm,
@@ -76,8 +77,7 @@ class Transformer(nn.Module):
         config = RobertaConfig.from_pretrained(text_encoder_type)
         self.text_encoder = RobertaModel(config=config)
 
-        self.embedding = DecoderEmbeddings(
-            len(self.tokenizer) + num_queries + 2, d_model, 1, max_decoding_step, dropout)
+        self.embedding = DecoderEmbeddings(len(self.tokenizer) + num_queries + 2, d_model, 1, max_decoding_step, dropout)
 
         if freeze_text_encoder:
             for p in self.text_encoder.parameters():
@@ -144,7 +144,7 @@ class Transformer(nn.Module):
 
                 # Resize the encoder hidden states to be of the same d_model as the decoder
                 text_memory_resized = self.resizer(text_memory)
-            elif type(text[0]) == type(torch.zeros(0)):
+            elif isinstance(text[0], torch.Tensor):
                 # The text is already encoded, use as is.
                 text_attention_mask, text_memory_resized, tokenized = text
             ## added; support input tokenized in dataloader for unitab_pretrain
@@ -172,7 +172,7 @@ class Transformer(nn.Module):
 
             ##############################################
             # Concat on the sequence dimension
-            src = torch.cat([src, text_memory_resized], dim=0)
+            src = torch.cat([self.norm(src), text_memory_resized], dim=0)
             # For mask, sequence dimension is second
             mask = torch.cat([mask, text_attention_mask], dim=1)
             # Pad the pos_embed with 0 so that the addition will be a no-op for the text tokens
@@ -286,7 +286,7 @@ class TransformerDecoder(nn.Module):
             )
 
             if self.return_intermediate:
-                intermediate.append(self.norm(output))
+                intermediate.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -479,8 +479,8 @@ class TransformerDecoderLayer(nn.Module):
         query_pos: Optional[Tensor] = None,
     ):
         if self.normalize_before:
-            return self.forward_pre(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask,
-                                    pos, query_pos)
+            return self.forward_pre(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask, pos,
+                                    query_pos)
         return self.forward_post(
             tgt,
             memory,
