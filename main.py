@@ -27,6 +27,9 @@ from engine import evaluate, train_one_epoch
 from models import build_model
 from models.postprocessors import build_postprocessors
 
+from colossalai.utils import get_current_device
+from colossalai.logging import get_dist_logger
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser("Set transformer detector", add_help=False)
@@ -173,6 +176,11 @@ def get_args_parser():
 def main(args):
     # Init distributed mode
     dist.init_distributed_mode(args)
+
+    args.fp16 = True
+
+    logger = get_dist_logger()
+
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     # Update dataset specific configs
     if args.dataset_config is not None:
@@ -182,19 +190,19 @@ def main(args):
             cfg = json.load(f)
         d.update(cfg)
 
-    print("git:\n  {}\n".format(utils.get_sha()))
+    logger.info("git:\n  {}\n".format(utils.get_sha()), ranks=[0])
 
-    print(json.dumps(vars(args), indent=4, sort_keys=True))
+    logger.info(json.dumps(vars(args), indent=4, sort_keys=True), ranks=[0])
 
-    device = torch.device(args.device)
+    device = get_current_device()
     output_dir = Path(args.output_dir)
 
-    # fix the seed for reproducibility
-    seed = args.seed + dist.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    # torch.use_deterministic_algorithms(True)
+    # # fix the seed for reproducibility
+    # seed = args.seed + dist.get_rank()
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
+    # random.seed(seed)
+    # # torch.use_deterministic_algorithms(True)
 
     # Build the model
     model, criterion, weight_dict = build_model(args)
@@ -204,13 +212,14 @@ def main(args):
     model_ema = deepcopy(model) if args.ema else None
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model,
-                                                          device_ids=[args.gpu],
-                                                          find_unused_parameters=True,
-                                                          broadcast_buffers=False)
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            #   device_ids=[args.gpu],
+            find_unused_parameters=True,
+            broadcast_buffers=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print("number of params:", n_parameters)
+    logger.info(f"number of params: {n_parameters}", ranks=[0])
 
     # Set up optimizers
     param_dicts = [
@@ -254,7 +263,7 @@ def main(args):
                 args.flickr_img_path = flickr_img_path_cache[ii]
                 args.coco_path = coco_path_cache[ii]
                 dataset_list.append(build_dataset(name, image_set="train", args=args))
-                print(len(dataset_list[-1]), name, args.GT_type, args.refexp_dataset_name)
+                # print(len(dataset_list[-1]), name, args.GT_type, args.refexp_dataset_name)
             dataset_train = ConcatDataset(dataset_list)
             args.GT_type, args.refexp_dataset_name = "merged_karpathy", "refcocog"
             args.flickr_img_path, args.coco_path = "data/Flickr30k/flickr30k-images/train", "data/coco"
@@ -318,7 +327,7 @@ def main(args):
     # Used for loading weights from another model and starting a training from scratch. Especially useful if
     # loading into a model with different functionality.
     if args.load:
-        print("loading from", args.load)
+        logger.info(f"loading from {args.load}", ranks=[0])
         if args.load.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(args.load, map_location="cpu", check_hash=True)
         else:
@@ -342,7 +351,7 @@ def main(args):
             args.start_epoch = checkpoint["epoch"] + 1
         if args.ema:
             if "model_ema" not in checkpoint:
-                print("WARNING: ema model not found in checkpoint, resetting to current model")
+                logger.info("WARNING: ema model not found in checkpoint, resetting to current model", ranks=[0])
                 model_ema = deepcopy(model_without_ddp)
             else:
                 model_ema.load_state_dict(checkpoint["model_ema"])
@@ -401,17 +410,14 @@ def main(args):
     #     print(log_stats)
     #     return
 
-    if args.fp16:
-        scaler = GradScaler()
-    else:
-        scaler = None
+    scaler = GradScaler()
 
     # Runs training and evaluates after every --eval_skip epochs
-    print("Start training")
+    logger.info("Start training", ranks=[0])
     start_time = time.time()
     best_metric = 0.0
     for epoch in range(args.start_epoch, args.epochs):
-        print(f"Starting epoch {epoch}")
+        logger.info(f"Starting epoch {epoch}", ranks=[0])
         if args.distributed:
             sampler_train.set_epoch(epoch)
 <<<<<<< HEAD
@@ -517,7 +523,7 @@ def main(args):
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print("Training time {}".format(total_time_str))
+    logger.info("Training time {}".format(total_time_str), ranks=[0])
 
 
 if __name__ == "__main__":

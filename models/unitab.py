@@ -16,6 +16,8 @@ from .backbone import build_backbone
 from .postprocessors import build_postprocessors
 from .transformer_unitab import build_transformer
 
+import colossalai.nn as col_nn
+
 
 def withbbox_subseq(textonly_subseq, bbox, start_token, end_token):
     withbbox_subseq = torch.zeros(textonly_subseq.shape[0] + 4 + 2).long().to(textonly_subseq.device)
@@ -153,8 +155,11 @@ class UniTAB(nn.Module):
         self.vocab_size = self.transformer.embedding.word_embeddings.weight.shape[0]
         self.text_vocab = len(self.transformer.tokenizer)
         assert (self.vocab_size == self.text_vocab or self.vocab_size == self.text_vocab + num_queries + 2)
-        self.coordclass_embed = nn.Linear(hidden_dim, self.vocab_size)  # reuse for coord regression
-        self.coordclass_embed.weight = self.transformer.embedding.word_embeddings.weight
+        # self.coordclass_embed = nn.Linear(hidden_dim, self.vocab_size)  # reuse for coord regression
+        # self.coordclass_embed.weight = self.transformer.embedding.word_embeddings.weight
+        self.coordclass_embed = col_nn.Classifier(hidden_dim,
+                                                  self.vocab_size,
+                                                  weight=self.transformer.embedding.word_embeddings.weight)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
 
