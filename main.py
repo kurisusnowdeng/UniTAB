@@ -420,20 +420,6 @@ def main(args):
         logger.info(f"Starting epoch {epoch}", ranks=[0])
         if args.distributed:
             sampler_train.set_epoch(epoch)
-<<<<<<< HEAD
-            train_stats = train_one_epoch(
-                model=model,
-                criterion=criterion,
-                data_loader=data_loader_train,
-                weight_dict=weight_dict,
-                optimizer=optimizer,
-                device=device,
-                epoch=epoch,
-                args=args,
-                max_norm=args.clip_max_norm,
-                model_ema=model_ema,
-            )
-=======
         train_stats = train_one_epoch(
             model=model,
             criterion=criterion,
@@ -447,7 +433,6 @@ def main(args):
             max_norm=args.clip_max_norm,
             model_ema=model_ema,
         )
->>>>>>> 8635109... forked from upstream
 
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]

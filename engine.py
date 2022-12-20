@@ -78,10 +78,10 @@ def train_one_epoch(
 
         loss_value = losses_reduced_scaled.item()
 
-        # if not math.isfinite(loss_value):
-        #     print("Loss is {}, stopping training".format(loss_value))
-        #     print(loss_dict_reduced)
-        #     sys.exit(1)
+        if not math.isfinite(loss_value):
+            print("Loss is {}, stopping training".format(loss_value))
+            print(loss_dict_reduced)
+            sys.exit(1)
 
         optimizer.zero_grad()
         scaler.scale(losses).backward()

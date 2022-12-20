@@ -47,3 +47,6 @@ boto3
 anytree
 botocore
 einops
+apex
+flash-attn
+colossalai
